@@ -1,0 +1,5 @@
+# Minimal runtime deps for the autonomous feeder
+paho-mqtt
+protobuf
+cryptography
+PyYAML
