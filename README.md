@@ -1,4 +1,7 @@
-# Meshtastic AIL Feeder (Autonome)
+# Meshtastic AIL Feeder (Autonomous)
+
+## Todo
+Upload to AIL  
 
 Small script to acquire meshtastic MQTT relayed messages.
 
@@ -10,18 +13,18 @@ Small script to acquire meshtastic MQTT relayed messages.
 
 ## Requirements
 - Python 3.11+  
-- Dependencies: `paho-mqtt`, `protobuf`, `cryptography`, `PyYAML` (optional for config).  
+- Dependencies: `paho-mqtt`, `protobuf`, `cryptography`, `PyYAML`.
 
 ## Quick install
 ```bash
 cd ail-feeder-meshtastic/src
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r ../requirements.txt  # or: pip install paho-mqtt protobuf cryptography pyyaml
+pip install -r requirements.txt  # or: pip install paho-mqtt protobuf cryptography pyyaml
 ```
 
 ## Configuration
-Edit `config.yaml` (or copy `config.yaml.sample`):
+Edit `config.yaml` (source `config.yaml.sample`):
 ```yaml
 broker: mqtt.server.address
 port: 1883
