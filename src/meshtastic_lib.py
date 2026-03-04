@@ -89,6 +89,7 @@ DEFAULT_PSK = bytes(
     ]
 )
 
+
 def _normalize_channel(name: Optional[str]) -> Optional[str]:
     """Trim and normalize channel name; return None if missing."""
     if not name:
@@ -140,15 +141,48 @@ def _safe_json(payload_bytes: bytes) -> Optional[Dict[str, Any]]:
 
 
 def _find_channel_from_topic(topic: str) -> Optional[str]:
-    """Extract channel name from MQTT topic segments."""
-    chan = _extract_channel_from_topic(topic)
+    """Extract channel name from MQTT topic segments (main + legacy heuristics)."""
+
+    if not topic:
+        return None
+
+    parts = [p for p in topic.split("/") if p and p not in {"#", "+"}]
+
+    # Primary heuristic: channel immediately after the subtopic marker.
+    for marker in ("json", "e", "c"):
+        try:
+            idx = parts.index(marker)
+        except ValueError:
+            continue
+        chan = parts[idx + 1] if idx + 1 < len(parts) else None
+        chan = _match_or_normalize_channel(chan)
+        if chan:
+            return chan
+
+    # Legacy fallback: segment before '!nodeid' or the last segment.
+    for idx, part in enumerate(parts):
+        if part.startswith("!"):
+            return _match_or_normalize_channel(parts[idx - 1] if idx > 0 else None)
+
+    chan = _match_or_normalize_channel(parts[-1] if parts else None)
     if chan:
         return chan
-    parts = topic.split("/")
+
+    # Last resort: explicit check for default LongFast often used in docs.
     for part in parts:
         if part.lower() == "longfast":
             return "LongFast"
     return None
+
+
+def _match_or_normalize_channel(chan: Optional[str]) -> Optional[str]:
+    """Return canonical channel name when it matches defaults; else normalized value."""
+    if not chan:
+        return None
+    for known in DEFAULT_CHANNEL_NAMES:
+        if known.lower() == chan.lower():
+            return known
+    return _normalize_channel(chan)
 
 
 def _find_channel_from_json(payload: Dict[str, Any]) -> Optional[str]:
@@ -179,15 +213,6 @@ def _find_channel_from_json(payload: Dict[str, Any]) -> Optional[str]:
                 if isinstance(v2, str):
                     return v2
     return None
-
-
-def _extract_channel_from_topic(topic: str) -> Optional[str]:
-    """Return the MQTT segment immediately before a '!nodeid' if present, else the last segment."""
-    parts = [p for p in topic.split("/") if p]
-    for idx, part in enumerate(parts):
-        if part.startswith("!"):  # take the label right before the node marker
-            return parts[idx - 1] if idx > 0 else None
-    return parts[-1] if parts else None
 
 
 def _maybe_decode_ascii_payload(payload_bytes: bytes) -> Tuple[bytes, bool]:
@@ -290,8 +315,19 @@ def _aes_ctr_decrypt(key: bytes, nonce: bytes, data: bytes) -> Optional[bytes]:
         return None
 
 
-def _try_decrypt_default_channel(packet_info: Dict[str, Any], channel_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Attempt decryption using hardcoded default PSKs for known channels."""
+def _try_decrypt_default_channel(
+    packet_info: Dict[str, Any], channel_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Attempt decryption using hardcoded default PSKs for known channels.
+
+    it use aes - ctr,
+    the Nonce is Builds a 16-byte nonce by concatenating three parts.
+        struct.pack("<Q", pkt_id_num): 8 little-endian bytes for the packet ID.
+        struct.pack("<I", from_num): 4 little-endian bytes for the sender ID.
+        b"\x00\x00\x00\x00": 4 zero bytes as padding/reserved.
+
+    """
+
     channel_id = _normalize_channel(channel_id)
     if not channel_id or channel_id not in DEFAULT_CHANNEL_NAMES:
         return None
@@ -312,8 +348,14 @@ def _try_decrypt_default_channel(packet_info: Dict[str, Any], channel_id: Option
     except Exception:
         return None
 
-    nonce = struct.pack("<Q", pkt_id_num) + struct.pack("<I", from_num) + b"\x00\x00\x00\x00"
-    keys = [DEFAULT_PSK] + [DEFAULT_PSK[:-1] + bytes([(DEFAULT_PSK[-1] + i) & 0xFF]) for i in range(1, 10)]
+    nonce = (
+        struct.pack("<Q", pkt_id_num)
+        + struct.pack("<I", from_num)
+        + b"\x00\x00\x00\x00"
+    )
+    keys = [DEFAULT_PSK] + [
+        DEFAULT_PSK[:-1] + bytes([(DEFAULT_PSK[-1] + i) & 0xFF]) for i in range(1, 10)
+    ]
     for key in keys:
         plain = _aes_ctr_decrypt(key, nonce, encrypted)
         if plain is None:
@@ -435,8 +477,14 @@ def _decode_service_envelope(payload_bytes: bytes) -> Optional[Dict[str, Any]]:
         if pkt_info is not None:
             info["packet"] = pkt_info
             # Try decrypting encrypted payloads using default channel PSKs only.
-            if isinstance(pkt_info, dict) and "encrypted_hex" in pkt_info and "text" not in pkt_info:
-                decrypted = _try_decrypt_default_channel(pkt_info, info.get("channel_id"))
+            if (
+                isinstance(pkt_info, dict)
+                and "encrypted_hex" in pkt_info
+                and "text" not in pkt_info
+            ):
+                decrypted = _try_decrypt_default_channel(
+                    pkt_info, info.get("channel_id")
+                )
                 if decrypted is not None:
                     pkt_info.update(decrypted)
                 # Also annotate channel_id on packet to keep context for downstream consumers.
