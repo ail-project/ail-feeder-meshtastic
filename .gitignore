@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+meshtastic_ail.sqlite
+config.yaml
+
 # C extensions
 *.so
 

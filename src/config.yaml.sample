@@ -1,0 +1,9 @@
+broker: mqtt.somewhere.com
+port: 1883
+username: usermesh
+password: password
+topic: msh/US/#
+channel: LongFast
+client_id: ligthclient-${RANDOM}
+flush_interval: 10
+expiry_seconds: 30
