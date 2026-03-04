@@ -7,3 +7,8 @@ channel: LongFast
 client_id: ligthclient-${RANDOM}
 flush_interval: 10
 expiry_seconds: 30
+http_post_url: http://www.circl.lu/ail
+http_buffer_max: 20        # optional
+http_buffer_window: 10     # optional
+http_timeout: 5            # optional
+

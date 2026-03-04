@@ -13,6 +13,8 @@ import signal
 import sqlite3
 import os
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -38,6 +40,13 @@ DEFAULT_FLUSH_INTERVAL = 5
 DEFAULT_EXPIRY_SECONDS = 15
 FLUSH_INTERVAL = DEFAULT_FLUSH_INTERVAL
 EXPIRY_SECONDS = DEFAULT_EXPIRY_SECONDS
+HTTP_POST_URL: Optional[str] = None
+HTTP_BUFFER_MAX = 20
+HTTP_BUFFER_WINDOW = 10.0
+HTTP_TIMEOUT = 5.0
+HTTP_BUFFER: List[Dict[str, Any]] = []
+HTTP_BUFFER_LOCK = threading.Lock()
+_LAST_HTTP_POST_TS = 0.0
 
 
 def _utc_now() -> str:
@@ -95,6 +104,21 @@ def _load_config() -> Dict[str, Any]:
                 print(f"Warning: failed to parse {p}: {exc}", file=sys.stderr)
                 return {}
     return {}
+
+
+def _apply_http_config(cfg: Dict[str, Any]) -> None:
+    """Load HTTP settings from config.yaml; HTTP_POST_URL is mandatory."""
+    global HTTP_POST_URL, HTTP_BUFFER_MAX, HTTP_BUFFER_WINDOW, HTTP_TIMEOUT
+    url_val = cfg.get("http_post_url") or cfg.get("HTTP_POST_URL")
+    if not url_val:
+        raise RuntimeError("config.yaml must define http_post_url (or HTTP_POST_URL)")
+    HTTP_POST_URL = str(url_val)
+    if "http_buffer_max" in cfg:
+        HTTP_BUFFER_MAX = int(cfg["http_buffer_max"])
+    if "http_buffer_window" in cfg:
+        HTTP_BUFFER_WINDOW = float(cfg["http_buffer_window"])
+    if "http_timeout" in cfg:
+        HTTP_TIMEOUT = float(cfg["http_timeout"])
 
 
 def _record_uid(
@@ -205,14 +229,56 @@ def _generate_uid(sender: Optional[str], text: Optional[str]) -> Optional[str]:
 
 
 def _emit_json(obj: Dict[str, Any]) -> None:
-    """Print JSON to stdout, stripping telemetry blob to keep lines small."""
+    """Print JSON to stdout and push it into the HTTP buffer."""
     try:
         if "telemetry" in obj:
             obj = {k: v for k, v in obj.items() if k != "telemetry"}
         print(json.dumps(obj, ensure_ascii=False))
         sys.stdout.flush()
+        _buffer_http_event(obj)
     except BrokenPipeError:
         sys.exit(0)
+
+
+def _buffer_http_event(event: Dict[str, Any]) -> None:
+    """Keep the last HTTP_BUFFER_MAX events within HTTP_BUFFER_WINDOW seconds and post them."""
+    global _LAST_HTTP_POST_TS
+    now_ts = time.time()
+    entry = {"ts": now_ts, "event": event}
+    with HTTP_BUFFER_LOCK:
+        cutoff = now_ts - HTTP_BUFFER_WINDOW
+        # prune old entries outside the window
+        HTTP_BUFFER[:] = [e for e in HTTP_BUFFER if e["ts"] >= cutoff]
+        HTTP_BUFFER.append(entry)
+        if len(HTTP_BUFFER) > HTTP_BUFFER_MAX:
+            HTTP_BUFFER[:] = HTTP_BUFFER[-HTTP_BUFFER_MAX:]
+        should_post = len(HTTP_BUFFER) >= HTTP_BUFFER_MAX or (
+            now_ts - _LAST_HTTP_POST_TS >= HTTP_BUFFER_WINDOW and HTTP_BUFFER
+        )
+        if not should_post:
+            return
+        payload = {"events": [e["event"] for e in HTTP_BUFFER], "count": len(HTTP_BUFFER)}
+    if _post_http_payload(payload):
+        _LAST_HTTP_POST_TS = now_ts
+        with HTTP_BUFFER_LOCK:
+            HTTP_BUFFER.clear()
+
+
+def _post_http_payload(payload: Dict[str, Any]) -> bool:
+    """Send buffered events to the configured HTTP endpoint via POST."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        HTTP_POST_URL,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return 200 <= (resp.getcode() or 0) < 300
+    except Exception as exc:
+        print(f"HTTP post failed: {exc}", file=sys.stderr)
+        return False
 
 
 def _merge_relays(existing: List[str], incoming: List[str]) -> List[str]:
@@ -423,6 +489,7 @@ def main() -> int:
         pass
     cfg = _load_config()
     lc.apply_config(cfg)
+    _apply_http_config(cfg)
     global FLUSH_INTERVAL, EXPIRY_SECONDS
     if cfg:
         FLUSH_INTERVAL = int(cfg.get("flush_interval", FLUSH_INTERVAL))
